@@ -25,9 +25,20 @@ final class SettingsWindowManagerTests: XCTestCase {
         manager.recordOpenRequest(page: .gateway, showPairing: true)
 
         XCTAssertTrue(manager.pendingPairingPresentation)
-        XCTAssertTrue(manager.consumePendingPairingPresentation())
+        XCTAssertTrue(manager.consumePendingPairingPresentation(canPresent: true))
         XCTAssertFalse(manager.pendingPairingPresentation)
-        XCTAssertFalse(manager.consumePendingPairingPresentation())
+        XCTAssertFalse(manager.consumePendingPairingPresentation(canPresent: true))
+    }
+
+    func testPairingPresentationIsNotConsumedUntilPresentable() {
+        let manager = SettingsWindowManager()
+        manager.recordOpenRequest(page: .gateway, showPairing: true)
+
+        XCTAssertTrue(manager.pendingPairingPresentation)
+        XCTAssertFalse(manager.consumePendingPairingPresentation(canPresent: false))
+        XCTAssertTrue(manager.pendingPairingPresentation)
+        XCTAssertTrue(manager.consumePendingPairingPresentation(canPresent: true))
+        XCTAssertFalse(manager.pendingPairingPresentation)
     }
 
     func testPairingRequestDefaultsToGatewayPage() {
@@ -37,7 +48,7 @@ final class SettingsWindowManagerTests: XCTestCase {
         XCTAssertEqual(manager.requestedPage, .gateway)
         XCTAssertTrue(manager.pendingPairingPresentation)
         XCTAssertEqual(manager.consumeRequestedPage(), .gateway)
-        XCTAssertTrue(manager.consumePendingPairingPresentation())
+        XCTAssertTrue(manager.consumePendingPairingPresentation(canPresent: true))
     }
 
     func testPageRequestDoesNotImplyPairing() {

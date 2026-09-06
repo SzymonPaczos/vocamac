@@ -201,12 +201,17 @@ struct GatewaySettingsTab: View {
         .formStyle(.grouped)
         .task {
             await gateway.refreshStatus()
+            presentPendingPairingIfNeeded()
         }
         .onAppear {
             presentPendingPairingIfNeeded()
         }
         .onChange(of: settingsWindowManager.pendingPairingPresentation) { _, pending in
             guard pending else { return }
+            presentPendingPairingIfNeeded()
+        }
+        .onChange(of: gateway.status) { _, status in
+            guard status.allowsPairing else { return }
             presentPendingPairingIfNeeded()
         }
         .sheet(isPresented: $showingPairSheet) {
@@ -223,10 +228,10 @@ struct GatewaySettingsTab: View {
     }
 
     private func presentPendingPairingIfNeeded() {
-        guard settingsWindowManager.consumePendingPairingPresentation() else { return }
-        if gateway.status.allowsPairing {
-            showingPairSheet = true
-        }
+        guard settingsWindowManager.consumePendingPairingPresentation(
+            canPresent: gateway.status.allowsPairing
+        ) else { return }
+        showingPairSheet = true
     }
 
     private var isStopDisabled: Bool {

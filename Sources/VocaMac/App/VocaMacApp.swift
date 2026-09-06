@@ -91,9 +91,10 @@ final class SettingsWindowManager: ObservableObject {
         return page
     }
 
-    /// Returns whether a pair-phone sheet was requested, then clears the flag.
-    func consumePendingPairingPresentation() -> Bool {
-        guard pendingPairingPresentation else { return false }
+    /// Consumes the pair-phone request only when the Gateway pane can show the sheet.
+    /// Leaves the flag set otherwise so a later pairable/ready status can retry.
+    func consumePendingPairingPresentation(canPresent: Bool) -> Bool {
+        guard pendingPairingPresentation, canPresent else { return false }
         pendingPairingPresentation = false
         return true
     }
