@@ -9,15 +9,9 @@ import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
-extension Notification.Name {
-    /// Menu bar asks Settings to select Gateway and show the pair sheet.
-    static let showGatewayPairing = Notification.Name("com.vocamac.showGatewayPairing")
-    /// Select a settings sidebar page (`userInfo["page"]` = SettingsPage.rawValue).
-    static let selectSettingsPage = Notification.Name("com.vocamac.selectSettingsPage")
-}
-
 struct GatewaySettingsTab: View {
     @ObservedObject private var gateway = GatewayEmbedController.shared
+    @EnvironmentObject private var settingsWindowManager: SettingsWindowManager
     @State private var showingPairSheet = false
     @State private var copiedURL = false
 
@@ -208,10 +202,12 @@ struct GatewaySettingsTab: View {
         .task {
             await gateway.refreshStatus()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .showGatewayPairing)) { _ in
-            if gateway.status.allowsPairing {
-                showingPairSheet = true
-            }
+        .onAppear {
+            presentPendingPairingIfNeeded()
+        }
+        .onChange(of: settingsWindowManager.pendingPairingPresentation) { _, pending in
+            guard pending else { return }
+            presentPendingPairingIfNeeded()
         }
         .sheet(isPresented: $showingPairSheet) {
             GatewayPairPhoneSheet(
@@ -223,6 +219,13 @@ struct GatewaySettingsTab: View {
                 },
                 onDismiss: { showingPairSheet = false }
             )
+        }
+    }
+
+    private func presentPendingPairingIfNeeded() {
+        guard settingsWindowManager.consumePendingPairingPresentation() else { return }
+        if gateway.status.allowsPairing {
+            showingPairSheet = true
         }
     }
 

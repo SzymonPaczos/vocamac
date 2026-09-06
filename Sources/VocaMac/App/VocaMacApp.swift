@@ -12,24 +12,25 @@ final class SettingsWindowManager: ObservableObject {
     private var settingsWindow: NSWindow?
     private var closeObserver: NSObjectProtocol?
 
-    func open(appState: AppState, page: SettingsPage? = nil) {
+    /// Sidebar page to apply when Settings appears. Survives first-open timing.
+    @Published private(set) var requestedPage: SettingsPage?
+    /// Pair-phone sheet to present when Gateway settings appears.
+    @Published private(set) var pendingPairingPresentation = false
+
+    func open(appState: AppState, page: SettingsPage? = nil, showPairing: Bool = false) {
+        recordOpenRequest(page: page, showPairing: showPairing)
+
         // If window already exists, just bring it to front
         if let window = settingsWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            if let page {
-                NotificationCenter.default.post(
-                    name: .selectSettingsPage,
-                    object: nil,
-                    userInfo: ["page": page.rawValue]
-                )
-            }
             return
         }
 
         // Create the settings view
-        let settingsView = SettingsView()
+        let settingsView = SettingsView(initialPage: requestedPage ?? .dictation)
             .environmentObject(appState)
+            .environmentObject(self)
 
         // Create a new window
         let window = NSWindow(
@@ -50,14 +51,6 @@ final class SettingsWindowManager: ObservableObject {
         DockVisibilityCoordinator.shared.windowDidOpen()
         NSApp.activate(ignoringOtherApps: true)
 
-        if let page {
-            NotificationCenter.default.post(
-                name: .selectSettingsPage,
-                object: nil,
-                userInfo: ["page": page.rawValue]
-            )
-        }
-
         // Held so it can be removed on close — a block-based observer lives
         // until its token is released, so opening repeatedly would otherwise
         // stack up observers.
@@ -76,6 +69,33 @@ final class SettingsWindowManager: ObservableObject {
                 DockVisibilityCoordinator.shared.windowDidClose()
             }
         }
+    }
+
+    /// Stores a sidebar page and/or pair-phone request until Settings consumes it.
+    func recordOpenRequest(page: SettingsPage? = nil, showPairing: Bool = false) {
+        if let page {
+            requestedPage = page
+        }
+        if showPairing {
+            pendingPairingPresentation = true
+            if requestedPage == nil {
+                requestedPage = .gateway
+            }
+        }
+    }
+
+    /// Returns and clears the requested sidebar page, if any.
+    func consumeRequestedPage() -> SettingsPage? {
+        guard let page = requestedPage else { return nil }
+        requestedPage = nil
+        return page
+    }
+
+    /// Returns whether a pair-phone sheet was requested, then clears the flag.
+    func consumePendingPairingPresentation() -> Bool {
+        guard pendingPairingPresentation else { return false }
+        pendingPairingPresentation = false
+        return true
     }
 }
 

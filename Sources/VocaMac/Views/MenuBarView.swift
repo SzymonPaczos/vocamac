@@ -572,15 +572,7 @@ struct MenuBarView: View {
 
             if gateway.status.allowsPairing {
                 Button {
-                    settingsManager.open(appState: appState)
-                    NotificationCenter.default.post(
-                        name: .selectSettingsPage,
-                        object: nil,
-                        userInfo: ["page": SettingsPage.gateway.rawValue]
-                    )
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        NotificationCenter.default.post(name: .showGatewayPairing, object: nil)
-                    }
+                    settingsManager.open(appState: appState, page: .gateway, showPairing: true)
                 } label: {
                     HStack {
                         Image(systemName: "qrcode")

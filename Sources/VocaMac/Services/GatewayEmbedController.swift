@@ -223,8 +223,10 @@ final class GatewayEmbedController: ObservableObject {
         do {
             try spawnNativeProcess(executable: binaryPath)
         } catch {
-            status = .error(error.localizedDescription)
-            lastErrorMessage = error.localizedDescription
+            let message = error.localizedDescription
+            status = .error(message)
+            lastErrorMessage = message
+            await terminateSpawnedProcess()
             return
         }
 
@@ -232,35 +234,22 @@ final class GatewayEmbedController: ObservableObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             await refreshStatus()
             if isLive { return }
-            if case .error = status { return }
+            if case .error = status {
+                await terminateSpawnedProcess()
+                return
+            }
         }
 
         if !isLive {
             let message = "Gateway did not become reachable on port \(GatewayPaths.defaultPort)."
             status = .error(message)
             lastErrorMessage = message
+            await terminateSpawnedProcess()
         }
     }
 
     func stop() async {
-        if let process, process.isRunning {
-            process.terminate()
-            let deadline = Date().addingTimeInterval(2)
-            while process.isRunning, Date() < deadline {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
-            if process.isRunning {
-                process.interrupt()
-            }
-        }
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        self.process = nil
-        self.stdoutPipe = nil
-
-        isLive = false
-        isReady = false
-        pairingPayload = nil
-        pairingPayloadRaw = nil
+        await terminateSpawnedProcess()
         status = .stopped
         lastErrorMessage = nil
     }
@@ -426,6 +415,28 @@ final class GatewayEmbedController: ObservableObject {
     }
 
     // MARK: - Private
+
+    /// SIGTERM/SIGINT the spawned child and drop the retained `Process`.
+    /// Does not change `status` — callers record `.stopped` or `.error`.
+    private func terminateSpawnedProcess() async {
+        if let process, process.isRunning {
+            process.terminate()
+            let deadline = Date().addingTimeInterval(2)
+            while process.isRunning, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if process.isRunning {
+                process.interrupt()
+            }
+        }
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        self.process = nil
+        self.stdoutPipe = nil
+        isLive = false
+        isReady = false
+        pairingPayload = nil
+        pairingPayloadRaw = nil
+    }
 
     private func spawnNativeProcess(executable: String) throws {
 #if os(macOS)
