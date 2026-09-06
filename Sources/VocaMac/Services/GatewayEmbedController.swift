@@ -218,6 +218,12 @@ final class GatewayEmbedController: ObservableObject {
         // Never stack a second child on a retained process that is no longer live.
         if process != nil {
             await terminateSpawnedProcess()
+            if process != nil {
+                let message = "Previous Gateway process could not be stopped."
+                status = .error(message)
+                lastErrorMessage = message
+                return
+            }
         }
 
         status = .starting
@@ -255,6 +261,8 @@ final class GatewayEmbedController: ObservableObject {
 
     func stop() async {
         await terminateSpawnedProcess()
+        // Only claim stopped after the child is gone; a surviving process stays stoppable.
+        guard process == nil else { return }
         status = .stopped
         lastErrorMessage = nil
     }
@@ -425,19 +433,29 @@ final class GatewayEmbedController: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// True while this controller still owns a child `Process` (running or not yet reaped).
+    var hasManagedProcess: Bool { process != nil }
+
     // MARK: - Private
 
-    /// SIGTERM/SIGINT the spawned child and drop the retained `Process`.
+    /// SIGTERM, then SIGINT, then SIGKILL the spawned child; drop the retained Process only after exit.
     /// Does not change `status` — callers record `.stopped` or `.error`.
     private func terminateSpawnedProcess() async {
         if let process, process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(2)
-            while process.isRunning, Date() < deadline {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
+            await waitForProcessExit(process, seconds: 2)
             if process.isRunning {
                 process.interrupt()
+                await waitForProcessExit(process, seconds: 2)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                await waitForProcessExit(process, seconds: 1)
+            }
+            // Do not abandon a surviving child; keep ownership so Stop can still target it.
+            if process.isRunning {
+                objectWillChange.send()
+                return
             }
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
@@ -447,6 +465,13 @@ final class GatewayEmbedController: ObservableObject {
         isReady = false
         pairingPayload = nil
         pairingPayloadRaw = nil
+    }
+
+    private func waitForProcessExit(_ process: Process, seconds: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while process.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     private func spawnNativeProcess(executable: String) throws {

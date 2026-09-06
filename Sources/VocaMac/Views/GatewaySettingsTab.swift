@@ -237,9 +237,9 @@ struct GatewaySettingsTab: View {
     private var isStopDisabled: Bool {
         switch gateway.status {
         case .stopped:
-            return true
+            return !gateway.hasManagedProcess
         case .error:
-            return !gateway.isLive
+            return !gateway.isLive && !gateway.hasManagedProcess
         case .starting, .pairable, .ready:
             return false
         }
