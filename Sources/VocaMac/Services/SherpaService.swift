@@ -105,18 +105,36 @@ final class SherpaService: @unchecked Sendable {
 
     // MARK: - Properties
 
-    /// The active C recognizer (created when a model is loaded)
-    private var recognizer: OpaquePointer?
+    /// A request retains its native model even if Settings unloads or replaces it.
+    /// The per-model lock serializes native decodes without blocking state reads.
+    private final class LoadedRecognizer: @unchecked Sendable {
+        let pointer: OpaquePointer
+        let size: ModelSize
+        let decodeLock = NSLock()
 
-    /// Which model is currently loaded
-    private var loadedSize: ModelSize?
+        init(pointer: OpaquePointer, size: ModelSize) {
+            self.pointer = pointer
+            self.size = size
+        }
 
-    /// Serializes recognizer lifecycle against decoding
+        deinit {
+            SherpaOnnxDestroyOfflineRecognizer(pointer)
+        }
+    }
+
+    private var loadedRecognizer: LoadedRecognizer?
+    private var loadGeneration = UUID()
     private let recognizerLock = NSLock()
 
-    var isModelLoaded: Bool { recognizer != nil }
+    var isModelLoaded: Bool { snapshot() != nil }
+    var loadedModelName: String? { snapshot()?.size.rawValue }
 
-    var loadedModelName: String? { loadedSize?.rawValue }
+    /// Retain the model atomically so its lifetime includes all request segments.
+    private func snapshot() -> LoadedRecognizer? {
+        recognizerLock.lock()
+        defer { recognizerLock.unlock() }
+        return loadedRecognizer
+    }
 
     deinit {
         unloadModel()
@@ -147,7 +165,8 @@ final class SherpaService: @unchecked Sendable {
         language: String?,
         onPhaseChange: ((String) -> Void)? = nil
     ) async throws {
-        unloadModel()
+        try Task.checkCancellation()
+        let generation = clearModel()
 
         guard let size = modelName.flatMap(ModelSize.init(rawValue:)),
               let spec = SherpaModelCatalog.spec(for: size) else {
@@ -191,38 +210,49 @@ final class SherpaService: @unchecked Sendable {
             throw SherpaError.initializationFailed(reason: "sherpa-onnx rejected the model files at \(directory.path)")
         }
 
-        adopt(recognizer: created, size: size)
+        guard !Task.isCancelled else {
+            SherpaOnnxDestroyOfflineRecognizer(created)
+            throw CancellationError()
+        }
+        guard adopt(recognizer: created, size: size, generation: generation) else {
+            throw CancellationError()
+        }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - startTime
         VocaLogger.info(.sherpaService, "ONNX model loaded in \(String(format: "%.2f", elapsed))s")
     }
 
-    /// Take ownership of a freshly created recognizer.
-    ///
-    /// Destroys whatever was installed before rather than overwriting it:
-    /// the pointer is native memory, so dropping the reference would leak the
-    /// model. Loads are serialized upstream, but this keeps the object safe
-    /// on its own terms.
-    private func adopt(recognizer created: OpaquePointer, size: ModelSize) {
+    /// Atomically install the model; existing requests retain their previous model.
+    private func adopt(recognizer created: OpaquePointer, size: ModelSize, generation: UUID) -> Bool {
+        let model = LoadedRecognizer(pointer: created, size: size)
         recognizerLock.lock()
-        defer { recognizerLock.unlock() }
-        if let existing = recognizer {
-            SherpaOnnxDestroyOfflineRecognizer(existing)
+        guard loadGeneration == generation else {
+            recognizerLock.unlock()
+            return false
         }
-        recognizer = created
-        loadedSize = size
+        let previous = loadedRecognizer
+        loadedRecognizer = model
+        recognizerLock.unlock()
+        // Release native memory outside the state lock.
+        withExtendedLifetime(previous) {}
+        return true
     }
 
-    /// Unload the current model and free memory
+    /// Remove the active model. In-flight requests release it when decoding finishes.
     func unloadModel() {
+        _ = clearModel()
+    }
+
+    /// Invalidate pending loads as well as removing the active model.
+    private func clearModel() -> UUID {
         recognizerLock.lock()
-        if let recognizer {
-            SherpaOnnxDestroyOfflineRecognizer(recognizer)
-            VocaLogger.info(.sherpaService, "ONNX model unloaded")
-        }
-        recognizer = nil
-        loadedSize = nil
+        let generation = UUID()
+        loadGeneration = generation
+        let previous = loadedRecognizer
+        loadedRecognizer = nil
         recognizerLock.unlock()
+        withExtendedLifetime(previous) {}
+        return generation
     }
 
     // MARK: - Transcription
@@ -236,13 +266,11 @@ final class SherpaService: @unchecked Sendable {
         audioData: [Float],
         language: String? = nil
     ) async throws -> VocaTranscription {
-        guard isModelLoaded, let size = loadedSize else {
-            throw SherpaError.modelNotLoaded
-        }
+        try Task.checkCancellation()
+        guard let request = snapshot() else { throw SherpaError.modelNotLoaded }
+        let size = request.size
 
-        guard !audioData.isEmpty else {
-            throw SherpaError.emptyAudio
-        }
+        try SherpaAudioPreparation.validate(audioData)
 
         let audioLengthSeconds = Double(audioData.count) / 16000.0
         VocaLogger.info(.sherpaService, "ONNX transcribing \(String(format: "%.1f", audioLengthSeconds))s of audio...")
@@ -251,54 +279,62 @@ final class SherpaService: @unchecked Sendable {
 
         // These models decode an utterance in one pass and degrade past a
         // certain length — Moonshine returns nothing at all — so anything
-        // longer is split at pauses and decoded segment by segment.
-        let maxSeconds = SherpaModelCatalog.spec(for: size)?.maxSegmentSeconds
+        // longer is split at pauses and decoded segment by segment. Every
+        // segment then gains a silent lead-in and tail, which counts against
+        // the same limit, so the speech budget is what is left after it.
+        let segmentLimit = SherpaModelCatalog.spec(for: size)?.maxSegmentSeconds
+        let maxSeconds = segmentLimit.map { $0 - SherpaAudioPreparation.addedSilenceSeconds }
         let segments: [[Float]]
         if let maxSeconds, audioLengthSeconds > maxSeconds {
             segments = AudioSegmenter.segment(audioData, maxSeconds: maxSeconds)
             VocaLogger.info(
                 .sherpaService,
-                "Audio exceeds \(String(format: "%.0f", maxSeconds))s for \(size.rawValue) — split into \(segments.count) segments"
+                "Audio exceeds \(String(format: "%.1f", maxSeconds))s for \(size.rawValue) — split into \(segments.count) segments"
             )
         } else {
             segments = [audioData]
         }
 
-        let decoded: (text: String, lang: String)? = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                var pieces: [String] = []
-                var detected = ""
-                for segment in segments {
-                    guard let result = self.decodeLocked(samples: segment) else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let piece = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !piece.isEmpty { pieces.append(piece) }
-                    if detected.isEmpty { detected = result.lang }
-                }
-                // Prefer the model's detected language; fall back to the caller's
-                // preference so CJK SenseVoice output is not space-joined.
-                let joinLanguage = detected.isEmpty ? (language ?? "") : detected
-                continuation.resume(
-                    returning: (Self.joinTranscriptPieces(pieces, language: joinLanguage), detected)
-                )
-            }
+        // Detached work stays off the UI executor while retaining Swift task
+        // cancellation. Native inference is synchronous: finish the current
+        // segment safely, then discard its result and stop before the next one.
+        let worker = Task.detached(priority: .userInitiated) {
+            try Self.decodeRequest(segments: segments, language: language, request: request)
         }
-
-        guard let decoded else {
-            throw SherpaError.transcriptionFailed(reason: "The model was unloaded during transcription.")
+        let decoded = try await withTaskCancellationHandler {
+            let result = try await worker.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            worker.cancel()
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - startTime
         let text = decoded.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         VocaLogger.info(.sherpaService, "ONNX transcription completed in \(String(format: "%.2f", elapsed))s")
-        VocaLogger.info(.sherpaService, "Result: \(text.prefix(100))...")
+        if text.isEmpty {
+            // The decoders return an empty string rather than an error when
+            // they stop on their first token, so nothing else marks a dropped
+            // recording. Say so plainly — an INFO line reading "Result: ..."
+            // is indistinguishable from a successful decode in a log. Digital
+            // silence never reaches the decoder at all, so it is not a
+            // failure and must not look like one.
+            if audioData.allSatisfy({ $0 == 0 }) {
+                VocaLogger.info(
+                    .sherpaService,
+                    "Nothing to decode — the recording is digital silence"
+                )
+            } else {
+                VocaLogger.warning(
+                    .sherpaService,
+                    "ONNX decode returned no text for \(String(format: "%.1f", audioLengthSeconds))s of audio"
+                )
+                FailedAudioDump.save(audioData, model: size.rawValue)
+            }
+        } else {
+            VocaLogger.info(.sherpaService, "Result: \(text.prefix(100))...")
+        }
 
         // SenseVoice reports the detected language; other models are
         // monolingual or fixed at load time.
@@ -313,29 +349,96 @@ final class SherpaService: @unchecked Sendable {
         )
     }
 
-    /// Join segment transcripts. CJK scripts do not use spaces between
-    /// phrases; Western languages do. SenseVoice tags look like `zh` / `ja`
-    /// / `yue` / `ko` (sometimes wrapped in `<|…|>`).
+    /// Serialize native decoding for a retained model without holding the state lock.
+    private static func decodeRequest(
+        segments: [[Float]], language: String?, request: LoadedRecognizer
+    ) throws -> (text: String, lang: String) {
+        try Task.checkCancellation()
+        request.decodeLock.lock()
+        defer { request.decodeLock.unlock() }
+        return try decodeSegments(segments, language: language) { samples in
+            try decode(samples: samples, recognizer: request.pointer)
+        }
+    }
+
+    /// Application-level segment processing, shared by native decoding and regressions.
+    static func decodeSegments(
+        _ segments: [[Float]],
+        language: String?,
+        decodeSegment: ([Float]) throws -> (text: String, lang: String)
+    ) throws -> (text: String, lang: String) {
+        try Task.checkCancellation()
+        var pieces: [String] = []
+        var detected = ""
+        for segment in segments {
+            try Task.checkCancellation()
+            guard let result = try decode(segment, with: decodeSegment) else { continue }
+            try Task.checkCancellation()
+            let piece = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !piece.isEmpty { pieces.append(piece) }
+            if detected.isEmpty { detected = result.lang }
+        }
+        let joinLanguage = detected.isEmpty ? (language ?? "") : detected
+        return (joinTranscriptPieces(pieces, language: joinLanguage), detected)
+    }
+
+    /// Decode one segment, retrying with a different silence layout when the
+    /// model returns nothing.
+    ///
+    /// These decoders stop as soon as they emit end-of-transcript, and for
+    /// some inputs they emit it as their very first token — the recording is
+    /// dropped with no error to show for it. Which inputs is not predictable:
+    /// the same words shifted by a few milliseconds decode either perfectly or
+    /// not at all. Retrying the same audio framed differently recovers it, and
+    /// only ever runs after an attempt that produced nothing.
+    ///
+    /// Returns nil when the segment held no audio to decode.
+    static func decode(
+        _ segment: [Float],
+        with decodeSegment: ([Float]) throws -> (text: String, lang: String)
+    ) throws -> (text: String, lang: String)? {
+        let samples = SherpaAudioPreparation.prepare(segment)
+        guard !samples.isEmpty else { return nil }
+
+        let first = try decodeSegment(samples)
+        guard first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return first
+        }
+
+        for layout in SherpaAudioPreparation.recoveryLayouts {
+            try Task.checkCancellation()
+            let retry = try decodeSegment(
+                SherpaAudioPreparation.prepare(segment, lead: layout.lead, tail: layout.tail)
+            )
+            if !retry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VocaLogger.info(
+                    .sherpaService,
+                    "Recovered an empty decode by reframing the segment"
+                )
+                return retry
+            }
+        }
+        return first
+    }
+
+    /// Join Chinese/Japanese segments without spaces. Korean, like Western
+    /// languages, needs spaces between words. SenseVoice may wrap language
+    /// tags in `<|…|>`.
     static func joinTranscriptPieces(_ pieces: [String], language: String) -> String {
         let lang = language.lowercased()
             .replacingOccurrences(of: "<|", with: "")
             .replacingOccurrences(of: "|>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let cjk = lang.hasPrefix("zh") || lang.hasPrefix("ja")
-            || lang.hasPrefix("yue") || lang.hasPrefix("ko")
-        return pieces.joined(separator: cjk ? "" : " ")
+        let joinsWithoutSpaces = lang.hasPrefix("zh") || lang.hasPrefix("ja") || lang.hasPrefix("yue")
+        return pieces.joined(separator: joinsWithoutSpaces ? "" : " ")
     }
 
-    /// Run one decode against the active recognizer. Returns nil if no model
-    /// is loaded. Called off the main thread; holds the lock so the
-    /// recognizer cannot be destroyed mid-decode.
-    private func decodeLocked(samples: [Float]) -> (text: String, lang: String)? {
-        recognizerLock.lock()
-        defer { recognizerLock.unlock() }
-
-        guard let recognizer,
-              let stream = SherpaOnnxCreateOfflineStream(recognizer) else {
-            return nil
+    /// Decode while the caller holds the recognizer lock for the whole request.
+    private static func decode(
+        samples: [Float], recognizer: OpaquePointer
+    ) throws -> (text: String, lang: String) {
+        guard let stream = SherpaOnnxCreateOfflineStream(recognizer) else {
+            throw SherpaError.transcriptionFailed(reason: "Could not create an ONNX audio stream.")
         }
         defer { SherpaOnnxDestroyOfflineStream(stream) }
 
@@ -345,7 +448,7 @@ final class SherpaService: @unchecked Sendable {
         SherpaOnnxDecodeOfflineStream(recognizer, stream)
 
         guard let result = SherpaOnnxGetOfflineStreamResult(stream) else {
-            return ("", "")
+            throw SherpaError.transcriptionFailed(reason: "The ONNX decoder returned no result.")
         }
         defer { SherpaOnnxDestroyOfflineRecognizerResult(result) }
 

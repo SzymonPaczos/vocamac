@@ -324,6 +324,10 @@ final class AppState: ObservableObject {
     /// Set to `true` in tests to avoid side effects.
     let skipSystemIntegration: Bool
 
+    /// Pre-load memory gate. Production defaults to SystemInfo; tests stub this
+    /// so CI free+inactive pages cannot flake medium/large mock loads.
+    var modelFitsInMemory: (ModelSize) -> Bool = { SystemInfo.canFitModelInMemory($0) }
+
     // MARK: - Initialization
 
     init(
@@ -550,12 +554,14 @@ final class AppState: ObservableObject {
 
         // Setup hotkey callbacks
         hotKeyManager.onRecordingStart = { [weak self] in
+            PerformanceTrace.event("HotKeyStart")
             Task { @MainActor in
                 await self?.startRecording()
             }
         }
 
         hotKeyManager.onRecordingStop = { [weak self] in
+            PerformanceTrace.event("HotKeyStop")
             Task { @MainActor in
                 await self?.stopRecordingAndTranscribe()
             }
@@ -915,6 +921,8 @@ final class AppState: ObservableObject {
     // MARK: - Recording Flow
 
     func startRecording() async {
+        let interval = PerformanceTrace.begin("RecordingStart")
+        defer { PerformanceTrace.end(interval) }
         // If we're already recording, this is a recovery attempt — the user
         // pressed the hotkey again because a previous key-up was missed.
         // Stop the current recording and transcribe what we have.
@@ -1025,6 +1033,8 @@ final class AppState: ObservableObject {
     }
 
     func stopRecordingAndTranscribe(injectResult: Bool = true) async {
+        let interval = PerformanceTrace.begin("StopToResultQueued")
+        defer { PerformanceTrace.end(interval) }
         // Accept stop if we're recording OR if the audio engine thinks
         // it's recording (covers stuck-state recovery scenarios where
         // isRecording and appStatus may be out of sync).
@@ -1251,6 +1261,20 @@ final class AppState: ObservableObject {
         // Resolve which ModelSize we're loading. When size is nil (auto-select),
         // we don't know yet — we'll detect it after loading completes.
         let targetSize = size
+
+        // Refuse known-too-large loads before WhisperKit/CoreML can hang the
+        // UI spinner under memory pressure (vocamac#250). Leave any already
+        // loaded model alone — we never started a load, so do not restore/clear.
+        if let targetSize,
+           !modelFitsInMemory(targetSize) {
+            let needed = String(format: "%.1f", targetSize.ramRequiredGB)
+            let failureMessage =
+                "Not enough free memory to load \(targetSize.displayName) "
+                + "(~\(needed) GB needed). Free RAM or choose a smaller model."
+            showTemporaryError(failureMessage)
+            VocaLogger.error(.appState, failureMessage)
+            return
+        }
 
         // Mark the model as loading in the UI
         if let targetSize = targetSize, let idx = availableModels.firstIndex(where: { $0.size == targetSize }) {
