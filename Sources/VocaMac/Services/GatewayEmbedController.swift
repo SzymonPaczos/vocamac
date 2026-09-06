@@ -215,6 +215,11 @@ final class GatewayEmbedController: ObservableObject {
             return
         }
 
+        // Never stack a second child on a retained process that is no longer live.
+        if process != nil {
+            await terminateSpawnedProcess()
+        }
+
         status = .starting
         lastErrorMessage = nil
         pairingPayload = nil
@@ -259,19 +264,23 @@ final class GatewayEmbedController: ObservableObject {
 
         let live = await probe(path: "/")
         let ready = await probe(path: "/health/ready")
-        isLive = live
-        isReady = ready
 
         if !live {
             pairingPayload = nil
             pairingPayloadRaw = nil
+            if process != nil, case .error = status {
+                // Reap a retained child so Stop is not disabled while it is still running.
+                await terminateSpawnedProcess()
+                return
+            }
             if process?.isRunning == true {
-                if case .error = status {
-                    return
-                }
+                isLive = false
+                isReady = false
                 status = .starting
                 return
             }
+            isLive = false
+            isReady = false
             if case .error = status {
                 return
             }
@@ -279,6 +288,8 @@ final class GatewayEmbedController: ObservableObject {
             return
         }
 
+        isLive = true
+        isReady = ready
         await fetchPairing()
     }
 
