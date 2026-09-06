@@ -18,7 +18,9 @@ Look for `good first issue` when that label is in use.
 
 ## Development setup
 
-You need an Apple Silicon Mac on macOS 14+, plus Xcode 15+ or Swift 5.9+.
+You need an Apple Silicon Mac on macOS 14+, plus Xcode 15+.
+
+`make build`, `make run`, and `make install` need Xcode (`xcodebuild`). A Swift 5.9+ toolchain alone is enough for some unit tests, not for building `VocaMac.app`.
 
 ```bash
 git clone https://github.com/VocaHQ/vocamac.git
