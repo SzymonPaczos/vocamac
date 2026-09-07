@@ -1350,6 +1350,14 @@ struct AudioSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Other Audio") {
+                Toggle("Lower other audio while dictating", isOn: $appState.duckOtherAudioEnabled)
+
+                Text("Turns the system volume down while the microphone is open — like the built-in dictation — and back up when you stop. Speakers only: it does not affect outputs without a software volume, such as HDMI.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Input Device") {
                 Picker("Microphone", selection: $appState.selectedAudioDeviceID) {
                     Text("System Default").tag("")

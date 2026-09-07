@@ -138,6 +138,26 @@ final class MockSoundManager: SoundPlaying {
     }
 }
 
+// MARK: - MockAudioDucker
+
+final class MockAudioDucker: AudioDucking {
+    var duckCallCount = 0
+    var restoreCallCount = 0
+    var restoreAfterUnexpectedExitCallCount = 0
+
+    func duck() {
+        duckCallCount += 1
+    }
+
+    func restore() {
+        restoreCallCount += 1
+    }
+
+    func restoreAfterUnexpectedExit() {
+        restoreAfterUnexpectedExitCallCount += 1
+    }
+}
+
 // MARK: - MockHotKeyManager
 
 final class MockHotKeyManager: HotKeyMonitoring {
@@ -643,12 +663,14 @@ extension AppState {
         UserDefaults.standard.removeObject(forKey: "vocamac.selectedAudioChannelDeviceID")
         UserDefaults.standard.removeObject(forKey: "vocamac.selectedAudioChannelCount")
         UserDefaults.standard.removeObject(forKey: "vocamac.soundEffectsEnabled")
+        UserDefaults.standard.removeObject(forKey: PreferenceKey.duckOtherAudioEnabled)
         UserDefaults.standard.removeObject(forKey: PreferenceKey.transcriptCleanupEnabled)
         UserDefaults.standard.removeObject(forKey: PreferenceKey.transcriptCleanupModel)
         UserDefaults.standard.removeObject(forKey: PreferenceKey.transcriptCleanupPrompt)
 
         let audioEngine = MockAudioEngine()
         let soundManager = MockSoundManager()
+        let audioDucker = MockAudioDucker()
         let hotKeyManager = MockHotKeyManager()
         let permissionManager = MockPermissionManager()
         let cursorOverlay = MockCursorOverlay()
@@ -659,6 +681,7 @@ extension AppState {
         let mocks = TestMocks(
             audioEngine: audioEngine,
             soundManager: soundManager,
+            audioDucker: audioDucker,
             hotKeyManager: hotKeyManager,
             permissionManager: permissionManager,
             cursorOverlay: cursorOverlay,
@@ -675,6 +698,7 @@ extension AppState {
             hotKeyManager: hotKeyManager,
             modelManager: modelManager,
             soundManager: soundManager,
+            audioDucker: audioDucker,
             cursorOverlay: cursorOverlay,
             statsManager: statsManager,
             snippetExpander: SnippetExpander(),
@@ -691,6 +715,7 @@ extension AppState {
 struct TestMocks {
     let audioEngine: MockAudioEngine
     let soundManager: MockSoundManager
+    let audioDucker: MockAudioDucker
     let hotKeyManager: MockHotKeyManager
     let permissionManager: MockPermissionManager
     let cursorOverlay: MockCursorOverlay

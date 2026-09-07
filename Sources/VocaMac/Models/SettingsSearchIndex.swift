@@ -153,6 +153,13 @@ enum SettingsSearchIndex {
             subtitle: "Start and stop cues",
             keywords: ["sound", "beep", "audio", "tone", "preview"]
         ),
+        SettingsSearchEntry(
+            id: "other-audio",
+            page: .audio,
+            title: "Other Audio",
+            subtitle: "Lower music while dictating",
+            keywords: ["duck", "mute", "music", "volume", "quiet", "lower", "playback", "youtube"]
+        ),
 
         // Performance
         SettingsSearchEntry(

@@ -60,6 +60,18 @@ extension SoundPlaying {
     }
 }
 
+// MARK: - AudioDucking
+
+/// Lowers other audio while a recording is open and puts it back afterwards.
+protocol AudioDucking: AnyObject {
+    /// Lower the default output volume. A second call while ducked is ignored.
+    func duck()
+    /// Put the volume back if it is still where `duck` left it.
+    func restore()
+    /// Undo a duck the previous process did not get to restore (crash, kill).
+    func restoreAfterUnexpectedExit()
+}
+
 // MARK: - HotKeyMonitoring
 
 protocol HotKeyMonitoring: AnyObject {

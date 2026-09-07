@@ -65,12 +65,20 @@ final class AppState: ObservableObject {
     private var recordingTranscription: RecordingTranscription?
     private var finishingTranscription: RecordingTranscription?
     private var isStoppingAudio = false
+    /// Every way a recording ends — stop, cancel, force recovery, a failed
+    /// start, an input device change, auto-pause — sets this to `false`, so
+    /// this is the one place that reliably sees the microphone close. Other
+    /// audio ducked for the recording is restored here rather than at each
+    /// of those exits; `restore()` is a no-op when nothing was ducked.
     @Published var isRecording: Bool = false {
         didSet {
             if !isRecording {
                 audioEngine.onAudioSamples = nil
                 recordingTranscription?.cancel()
                 recordingTranscription = nil
+            }
+            if oldValue && !isRecording {
+                audioDucker.restore()
             }
         }
     }
@@ -130,6 +138,7 @@ final class AppState: ObservableObject {
     @AppStorage("vocamac.preserveClipboard") var preserveClipboard: Bool = true
     @AppStorage("vocamac.soundEffectsEnabled") var soundEffectsEnabled: Bool = true
     @AppStorage(PreferenceKey.dictationTone) var dictationTone: DictationTone = .voca
+    @AppStorage(PreferenceKey.duckOtherAudioEnabled) var duckOtherAudioEnabled: Bool = false
     @AppStorage("vocamac.overlayStyle") var overlayStyle: OverlayStyle = .minimal
     @AppStorage("vocamac.overlayPosition") var overlayPosition: OverlayPosition = .bottom
     /// Legacy preference retained so existing installs that disabled the old
@@ -265,6 +274,7 @@ final class AppState: ObservableObject {
     let hotKeyManager: HotKeyMonitoring
     let modelManager: ModelManaging
     let soundManager: SoundPlaying
+    let audioDucker: AudioDucking
     let cursorOverlay: CursorOverlayManaging
     let statsManager: StatsManaging
     let snippetExpander: SnippetExpanding
@@ -357,6 +367,7 @@ final class AppState: ObservableObject {
         hotKeyManager: HotKeyMonitoring = HotKeyManager(),
         modelManager: ModelManaging = ModelManager(),
         soundManager: SoundPlaying = SoundManager(),
+        audioDucker: AudioDucking = AudioDucker(),
         cursorOverlay: CursorOverlayManaging,
         statsManager: StatsManaging,
         snippetExpander: SnippetExpanding = SnippetExpander(),
@@ -370,6 +381,7 @@ final class AppState: ObservableObject {
         self.hotKeyManager = hotKeyManager
         self.modelManager = modelManager
         self.soundManager = soundManager
+        self.audioDucker = audioDucker
         self.cursorOverlay = cursorOverlay
         self.statsManager = statsManager
         self.snippetExpander = snippetExpander
@@ -1028,6 +1040,13 @@ final class AppState: ObservableObject {
         // Start recording immediately for instant responsiveness.
         // The start sound is played concurrently — any brief bleed into the
         // mic buffer is negligible and handled well by WhisperKit's noise model.
+        // Lower other audio before the microphone opens, so none of it lands
+        // in the first buffers. Restored from `isRecording`'s observer on
+        // every exit, including a start that fails below.
+        if duckOtherAudioEnabled {
+            audioDucker.duck()
+        }
+
         isStartingAudio = true
         pendingStopDuringStart = nil
         let session = whisperService.startStreaming(language: selectedLanguage == "auto" ? nil : selectedLanguage)
@@ -1675,6 +1694,9 @@ final class AppState: ObservableObject {
             VocaLogger.setLogLevel(level)
         }
         VocaLogger.info(.appState, "performStartup beginning...")
+
+        // A crash while dictating would otherwise leave the Mac quiet.
+        audioDucker.restoreAfterUnexpectedExit()
 
         // 1. Detect hardware
         systemCapabilities = SystemInfo.detect()
