@@ -128,9 +128,18 @@ final class AudioDucker: AudioDucking {
     // MARK: AudioDucking
 
     func duck() {
-        guard pending == nil else {
-            VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
-            return
+        if let record = pending {
+            if control.volume(of: record.deviceID) == nil {
+                VocaLogger.info(
+                    .audioDucker,
+                    "Could not read volume on device \(record.deviceID) — dropping stale pending restore so a new duck can proceed"
+                )
+                pending = nil
+                clearPersisted()
+            } else {
+                VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
+                return
+            }
         }
         guard let output = control.defaultOutput() else {
             VocaLogger.info(.audioDucker, "Default output has no software volume — not ducking")
@@ -182,18 +191,17 @@ final class AudioDucker: AudioDucking {
     /// - Returns: `true` when the pending record may be discarded, `false` when
     ///   it must be kept so a later retry can still restore the original volume.
     ///
-    /// Discard (`true`) when the restore write succeeded, the volume was moved
-    /// by the user (outside ducked tolerance), or the device is gone / has no
-    /// volume (terminal: a retry cannot usefully restore).
-    /// Keep (`false`) when the device is still present at the ducked volume
-    /// but `setVolume` failed.
+    /// Discard (`true`) when the restore write succeeded, or the user moved
+    /// the volume outside ducked tolerance.
+    /// Keep (`false`) when `setVolume` failed while still at the ducked volume,
+    /// or `volume(of:)` returned nil (device unreadability / transient failure).
     private func finishRestore(_ record: PendingRestore, reason: String) -> Bool {
         guard let current = control.volume(of: record.deviceID) else {
             VocaLogger.warning(
                 .audioDucker,
-                "Device \(record.deviceID) is gone or has no volume — leaving output as is (\(reason))"
+                "Could not read volume on device \(record.deviceID) — keeping pending restore for retry (\(reason))"
             )
-            return true
+            return false
         }
         guard abs(current - record.duckedVolume) <= Self.volumeTolerance else {
             VocaLogger.info(

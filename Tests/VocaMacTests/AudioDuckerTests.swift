@@ -127,21 +127,69 @@ final class AudioDuckerTests: XCTestCase {
 
         ducker.restore()
         XCTAssertEqual(control.setCalls.count, callsBefore, "No device to restore on")
-        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey), "Gone device is terminal; drop the record")
+        XCTAssertNotNil(
+            defaults.data(forKey: AudioDucker.pendingRestoreKey),
+            "Nil volume read is not terminal; keep the record for retry"
+        )
+    }
+
+    func testNilVolumeReadKeepsPendingUntilALaterRestoreSucceeds() {
+        let ducker = makeDucker()
+        ducker.duck()
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+
+        control.volumes = [:]
+        ducker.restore()
+        XCTAssertNotNil(
+            defaults.data(forKey: AudioDucker.pendingRestoreKey),
+            "Nil read keeps persistence so restore can retry"
+        )
+
+        control.volumes = [1: 0.2]
+        ducker.restore()
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001)
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
+    }
+
+    func testStaleUnreadablePendingDoesNotBlockANewDuck() {
+        let ducker = makeDucker()
+        ducker.duck()
+
+        control.volumes = [:]
+        ducker.restore()
+        XCTAssertNotNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
+
+        control.volumes = [2: 0.8]
+        control.defaultDeviceID = 2
+        ducker.duck()
+
+        XCTAssertEqual(control.volumes[2]!, 0.2, accuracy: 0.001, "Stale unreadability must not block ducking a new device")
+        guard let data = defaults.data(forKey: AudioDucker.pendingRestoreKey),
+              let record = try? JSONDecoder().decode(AudioDucker.PendingRestore.self, from: data) else {
+            XCTFail("Expected a persisted restore for the newly ducked device")
+            return
+        }
+        XCTAssertEqual(record.deviceID, 2)
     }
 
     func testSecondDuckWhileDuckedIsIgnored() {
         let ducker = makeDucker()
         ducker.duck()
-        ducker.duck()
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+        XCTAssertEqual(control.setCalls.count, 1, "First duck writes the ducked volume once")
+        XCTAssertEqual(control.setCalls[0].volume, 0.2, accuracy: 0.001)
 
-        XCTAssertEqual(control.setCalls.count, 1)
+        ducker.duck()
+        XCTAssertEqual(
+            control.setCalls.count, 1,
+            "A second duck must not restore then re-duck while volume is still readable"
+        )
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+        XCTAssertNotNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
 
         ducker.restore()
-        XCTAssertEqual(
-            control.volumes[1]!, 0.8, accuracy: 0.001,
-            "The original must not be overwritten by the already-ducked value"
-        )
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001)
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 
     func testRestoreWithoutDuckIsANoOp() {
