@@ -65,6 +65,8 @@ final class AppState: ObservableObject {
     private var recordingTranscription: RecordingTranscription?
     private var finishingTranscription: RecordingTranscription?
     private var isStoppingAudio = false
+    /// Paste failure held while a live recording would be clobbered by `showTemporaryError`.
+    private var pendingInsertionFailure: String?
     @Published var isRecording: Bool = false {
         didSet {
             if !isRecording {
@@ -471,8 +473,7 @@ final class AppState: ObservableObject {
     private func setupServices() {
         textInjector.onFailure = { [weak self] message in
             Task { @MainActor in
-                guard let self, !self.isRecording else { return }
-                self.showTemporaryError(message)
+                self?.queueOrPresentInsertionFailure(message)
             }
         }
         // Detect system capabilities
@@ -781,19 +782,23 @@ final class AppState: ObservableObject {
         await loadModel(size)
     }
 
-    private func handleAutoPauseEntered() async {
+    /// Pause dictation because a listed app came to the foreground.
+    /// Aborts a live or finishing recording without injecting.
+    func handleAutoPauseEntered() async {
         isAutoPaused = true
         autoPauseTriggerDisplayName = autoPauseMonitor.activeTrigger?.displayName
         modelKeepAlive.cancel()
 
-        if isRecording || appStatus == .recording {
+        if isRecording || appStatus == .recording || finishingTranscription != nil {
             VocaLogger.warning(.appState, "Auto-pause entered while recording: stopping without inject")
+            invalidateActiveRecording()
             _ = await stopAudioEngine()
             isRecording = false
             audioLevel = 0
             cursorOverlay.hide()
             hotKeyManager.resetKeyState()
             appStatus = .idle
+            presentPendingInsertionFailureIfNeeded()
         }
 
         if whisperService.isModelLoaded {
@@ -919,8 +924,7 @@ final class AppState: ObservableObject {
     /// It unconditionally resets the audio engine, hotkey state, cursor overlay,
     /// and all published state back to idle.
     func forceRecovery() {
-        recordingGeneration = UUID()
-        finishingTranscription?.cancel()
+        invalidateActiveRecording()
         VocaLogger.warning(.appState, "Force recovery: resetting all state to idle (was appStatus=\(appStatus.rawValue), isRecording=\(isRecording))")
 
         // Reset audio engine unconditionally
@@ -1110,6 +1114,7 @@ final class AppState: ObservableObject {
         guard !audioData.isEmpty else {
             cursorOverlay.hide()
             appStatus = .idle
+            presentPendingInsertionFailureIfNeeded()
             return
         }
 
@@ -1186,6 +1191,7 @@ final class AppState: ObservableObject {
 
             cursorOverlay.hide()
             appStatus = .idle
+            presentPendingInsertionFailureIfNeeded()
         } catch {
             guard generation == recordingGeneration else { return }
             cursorOverlay.hide()
@@ -1205,7 +1211,7 @@ final class AppState: ObservableObject {
     /// Cancels the active recording without sending its audio to a transcription
     /// engine. This is used by the overlay's cancel button.
     func cancelRecording() async {
-        guard isRecording || appStatus == .recording else { return }
+        guard isRecording || appStatus == .recording || finishingTranscription != nil else { return }
 
         if isStartingAudio {
             pendingStopDuringStart = .discard
@@ -1213,6 +1219,7 @@ final class AppState: ObservableObject {
             return
         }
 
+        invalidateActiveRecording()
         _ = await stopAudioEngine()
         isRecording = false
         audioLevel = 0.0
@@ -1220,6 +1227,7 @@ final class AppState: ObservableObject {
         hotKeyManager.resetKeyState()
         appStatus = .idle
         errorMessage = nil
+        presentPendingInsertionFailureIfNeeded()
         VocaLogger.info(.appState, "Recording cancelled from overlay")
     }
 
@@ -1242,6 +1250,7 @@ final class AppState: ObservableObject {
             case .discard:
                 appStatus = .idle
                 errorMessage = nil
+                presentPendingInsertionFailureIfNeeded()
             case .transcribe:
                 showTemporaryError("The microphone was still connecting, so nothing was recorded. Bluetooth headsets need a moment — hold the hotkey until the start sound, then speak.")
             }
@@ -1479,6 +1488,31 @@ final class AppState: ObservableObject {
 
         VocaLogger.info(.appState, "Language changed to \(selectedLanguage) — reloading \(size.displayName)")
         await loadModel(size)
+    }
+
+    /// Drop the current recording token so an in-flight stop cannot transcribe or inject.
+    private func invalidateActiveRecording() {
+        recordingGeneration = UUID()
+        finishingTranscription?.cancel()
+        finishingTranscription = nil
+    }
+
+    /// Keep paste failures off the live recording status, then surface them once idle.
+    private func queueOrPresentInsertionFailure(_ message: String) {
+        if isRecording || appStatus == .recording {
+            pendingInsertionFailure = message
+            VocaLogger.info(.appState, "Insertion failed during recording; showing notice when idle")
+            return
+        }
+        showTemporaryError(message)
+    }
+
+    /// Present a queued paste failure once, after the live session has ended.
+    private func presentPendingInsertionFailureIfNeeded() {
+        guard !isRecording, appStatus == .idle else { return }
+        guard let message = pendingInsertionFailure else { return }
+        pendingInsertionFailure = nil
+        showTemporaryError(message)
     }
 
     /// Surface a short-lived error state for settings and menu UI.

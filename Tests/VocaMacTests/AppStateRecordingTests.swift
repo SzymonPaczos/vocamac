@@ -882,3 +882,171 @@ extension AppStateRecordingTests {
         XCTAssertNil(mocks.whisperService.lastTranscribedAudioData)
     }
 }
+
+// MARK: - Insertion failure notice while recording
+
+@MainActor
+final class AppStateInsertionFailureNoticeTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "vocamac.soundEffectsEnabled")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "vocamac.soundEffectsEnabled")
+        super.tearDown()
+    }
+
+    func testInsertionFailureDuringRecordingIsShownAfterIdle() async throws {
+        let (appState, mocks) = AppState.makeTestState()
+        await appState.startRecording()
+        XCTAssertTrue(appState.isRecording)
+        XCTAssertEqual(appState.appStatus, .recording)
+
+        let failure = "The active app changed before text could be pasted. Your transcript is available in VocaMac."
+        mocks.textInjector.onFailure?(failure)
+        await Task { @MainActor in }.value
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        XCTAssertEqual(appState.appStatus, .recording,
+                       "showing the paste failure must not clobber the live recording")
+        XCTAssertTrue(appState.isRecording)
+        XCTAssertNil(appState.errorMessage,
+                     "the notice is queued until recording ends")
+
+        await appState.cancelRecording()
+
+        XCTAssertEqual(appState.appStatus, .error)
+        XCTAssertEqual(appState.errorMessage, failure)
+
+        appState.appStatus = .idle
+        appState.errorMessage = nil
+        await appState.startRecording()
+        await appState.stopRecordingAndTranscribe()
+
+        XCTAssertEqual(appState.appStatus, .idle)
+        XCTAssertNil(appState.errorMessage,
+                     "a later idle transition must not resurrect a notice that was already shown")
+    }
+
+    func testInsertionFailureWhenIdleShowsImmediately() async throws {
+        let (appState, mocks) = AppState.makeTestState()
+        XCTAssertFalse(appState.isRecording)
+
+        let failure = "There was no active app to paste into. Your transcript is available in VocaMac."
+        mocks.textInjector.onFailure?(failure)
+        await Task { @MainActor in }.value
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        XCTAssertEqual(appState.appStatus, .error)
+        XCTAssertEqual(appState.errorMessage, failure)
+    }
+}
+
+// MARK: - Abort invalidates in-flight stop
+
+@MainActor
+final class AppStateRecordingAbortGenerationTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "vocamac.soundEffectsEnabled")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "vocamac.soundEffectsEnabled")
+        super.tearDown()
+    }
+
+    func testCancelDuringStopDoesNotInject() async throws {
+        let (appState, mocks) = AppState.makeTestState()
+        mocks.audioEngine.stopRecordingResult = Array(repeating: Float(0.1), count: 16_000)
+        mocks.audioEngine.stopRecordingDelay = 0.3
+        mocks.whisperService.mockTranscriptionResult = VocaTranscription(
+            text: "should not inject",
+            duration: 1.0,
+            detectedLanguage: "en",
+            audioLengthSeconds: 1.0,
+            modelUsed: .tiny
+        )
+
+        await appState.startRecording()
+
+        let stop = Task { await appState.stopRecordingAndTranscribe() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await appState.cancelRecording()
+        await stop.value
+
+        XCTAssertEqual(mocks.textInjector.injectCallCount, 0)
+        XCTAssertNil(appState.lastTranscription)
+        XCTAssertFalse(appState.isRecording)
+        XCTAssertEqual(appState.appStatus, .idle)
+        XCTAssertNil(mocks.whisperService.lastTranscribedAudioData)
+    }
+
+    func testAutoPauseDuringStopDoesNotInject() async throws {
+        let (appState, mocks) = AppState.makeTestState()
+        mocks.audioEngine.stopRecordingResult = Array(repeating: Float(0.1), count: 16_000)
+        mocks.audioEngine.stopRecordingDelay = 0.3
+        mocks.whisperService.mockTranscriptionResult = VocaTranscription(
+            text: "should not inject",
+            duration: 1.0,
+            detectedLanguage: "en",
+            audioLengthSeconds: 1.0,
+            modelUsed: .tiny
+        )
+
+        await appState.startRecording()
+
+        let stop = Task { await appState.stopRecordingAndTranscribe() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await appState.handleAutoPauseEntered()
+        await stop.value
+
+        XCTAssertEqual(mocks.textInjector.injectCallCount, 0)
+        XCTAssertNil(appState.lastTranscription)
+        XCTAssertFalse(appState.isRecording)
+        XCTAssertEqual(appState.appStatus, .idle)
+        XCTAssertTrue(appState.isAutoPaused)
+        XCTAssertNil(mocks.whisperService.lastTranscribedAudioData)
+    }
+
+    func testCancelDuringFinishingTranscriptionDoesNotInject() async throws {
+        let (appState, mocks) = AppState.makeTestState()
+        mocks.whisperService.streamingFactory = { language in
+            RecordingTranscription(language: language) { chunks in
+                for try await _ in chunks { }
+                try await Task.sleep(nanoseconds: 400_000_000)
+                return VocaTranscription(
+                    text: "should not inject",
+                    duration: 0.1,
+                    detectedLanguage: "en",
+                    audioLengthSeconds: 3.0 / 16_000,
+                    modelUsed: .tiny
+                )
+            }
+        }
+
+        await appState.startRecording()
+        mocks.audioEngine.onAudioSamples?([0.2, 0.3], 0)
+        mocks.audioEngine.onAudioSamples?([0.4], 2)
+        mocks.audioEngine.stopRecordingResult = [0.2, 0.3, 0.4]
+
+        let stop = Task { await appState.stopRecordingAndTranscribe() }
+        let deadline = Date().addingTimeInterval(1.0)
+        while appState.appStatus != .processing && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(appState.appStatus, .processing,
+                       "stop should have moved the session into finishing before cancel")
+
+        await appState.cancelRecording()
+        await stop.value
+
+        XCTAssertEqual(mocks.textInjector.injectCallCount, 0)
+        XCTAssertNil(appState.lastTranscription)
+        XCTAssertFalse(appState.isRecording)
+        XCTAssertEqual(appState.appStatus, .idle)
+    }
+}

@@ -27,6 +27,7 @@ final class MockAudioEngine: AudioRecording {
     var lastPreferredInputChannelDeviceID: String?
     var lastPreferredInputChannelCount: Int?
     var stopRecordingResult: [Float] = []
+    var stopRecordingDelay: TimeInterval = 0
     var forceResetCallCount = 0
     var startRecordingResult = true
     var startRecordingDelay: TimeInterval = 0
@@ -78,6 +79,9 @@ final class MockAudioEngine: AudioRecording {
 
     @discardableResult
     func stopRecording() -> [Float] {
+        if stopRecordingDelay > 0 {
+            Thread.sleep(forTimeInterval: stopRecordingDelay)
+        }
         isCurrentlyRecording = false
         return stopRecordingResult
     }
@@ -495,6 +499,7 @@ final class MockWhisperService: SpeechTranscribing {
 // MARK: - MockTextInjector
 
 final class MockTextInjector: TextInjecting {
+    var onFailure: ((String) -> Void)?
     var injectCallCount = 0
     var lastInjectedText: String?
     var lastPreserveClipboard: Bool?
