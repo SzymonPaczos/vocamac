@@ -128,18 +128,9 @@ final class AudioDucker: AudioDucking {
     // MARK: AudioDucking
 
     func duck() {
-        if let record = pending {
-            if control.volume(of: record.deviceID) == nil {
-                VocaLogger.info(
-                    .audioDucker,
-                    "Could not read volume on device \(record.deviceID) — dropping stale pending restore so a new duck can proceed"
-                )
-                pending = nil
-                clearPersisted()
-            } else {
-                VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
-                return
-            }
+        guard pending == nil else {
+            VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
+            return
         }
         guard let output = control.defaultOutput() else {
             VocaLogger.info(.audioDucker, "Default output has no software volume — not ducking")

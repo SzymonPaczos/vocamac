@@ -151,25 +151,32 @@ final class AudioDuckerTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 
-    func testStaleUnreadablePendingDoesNotBlockANewDuck() {
+    func testUnreadablePendingIgnoresASecondDuckOnADifferentDevice() {
         let ducker = makeDucker()
         ducker.duck()
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+        let setCallsAfterFirstDuck = control.setCalls.count
 
         control.volumes = [:]
         ducker.restore()
-        XCTAssertNotNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
+        XCTAssertNotNil(
+            defaults.data(forKey: AudioDucker.pendingRestoreKey),
+            "Nil volume read keeps the original pending restore"
+        )
 
         control.volumes = [2: 0.8]
         control.defaultDeviceID = 2
         ducker.duck()
 
-        XCTAssertEqual(control.volumes[2]!, 0.2, accuracy: 0.001, "Stale unreadability must not block ducking a new device")
+        XCTAssertEqual(control.setCalls.count, setCallsAfterFirstDuck, "Second duck must be ignored while a restore is still pending")
+        XCTAssertEqual(control.volumes[2]!, 0.8, accuracy: 0.001, "The new default output must not be ducked")
         guard let data = defaults.data(forKey: AudioDucker.pendingRestoreKey),
               let record = try? JSONDecoder().decode(AudioDucker.PendingRestore.self, from: data) else {
-            XCTFail("Expected a persisted restore for the newly ducked device")
+            XCTFail("Expected the original pending restore to remain persisted")
             return
         }
-        XCTAssertEqual(record.deviceID, 2)
+        XCTAssertEqual(record.deviceID, 1, "Pending record still refers to the original device")
+        XCTAssertEqual(record.originalVolume, 0.8, accuracy: 0.001)
     }
 
     func testSecondDuckWhileDuckedIsIgnored() {
