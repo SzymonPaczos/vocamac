@@ -7,6 +7,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AppKit
 import ServiceManagement
 
 // MARK: - Enums
@@ -632,6 +633,15 @@ final class AppState: ObservableObject {
         // Forward PermissionManager state changes to trigger SwiftUI updates
         permissionManager.objectWillChangePublisher
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        // Quit and Restart call `terminate` without setting `isRecording` to
+        // false, so the didSet restore never runs. Restore ducked volume here
+        // directly. A second restore is a no-op when nothing is pending.
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                self?.audioDucker.restore()
+            }
             .store(in: &cancellables)
 
         // Auto-save snippets when changed. @Published emits on willSet, so

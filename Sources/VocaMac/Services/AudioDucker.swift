@@ -160,60 +160,80 @@ final class AudioDucker: AudioDucking {
 
     func restore() {
         guard let record = pending else { return }
-        pending = nil
-        clearPersisted()
-        finishRestore(record, reason: "recording ended")
+        if finishRestore(record, reason: "recording ended") {
+            pending = nil
+            clearPersisted()
+        }
     }
 
     func restoreAfterUnexpectedExit() {
         guard pending == nil, let record = loadPersisted() else { return }
-        clearPersisted()
-        finishRestore(record, reason: "previous run ended while ducked")
+        if finishRestore(record, reason: "previous run ended while ducked") {
+            pending = nil
+            clearPersisted()
+        } else {
+            pending = record
+        }
     }
 
     // MARK: Restore policy
 
-    private func finishRestore(_ record: PendingRestore, reason: String) {
+    /// Applies the restore policy for `record`.
+    /// - Returns: `true` when the pending record may be discarded, `false` when
+    ///   it must be kept so a later retry can still restore the original volume.
+    ///
+    /// Discard (`true`) when the restore write succeeded, the volume was moved
+    /// by the user (outside ducked tolerance), or the device is gone / has no
+    /// volume (terminal: a retry cannot usefully restore).
+    /// Keep (`false`) when the device is still present at the ducked volume
+    /// but `setVolume` failed.
+    private func finishRestore(_ record: PendingRestore, reason: String) -> Bool {
         guard let current = control.volume(of: record.deviceID) else {
             VocaLogger.warning(
                 .audioDucker,
                 "Device \(record.deviceID) is gone or has no volume — leaving output as is (\(reason))"
             )
-            return
+            return true
         }
         guard abs(current - record.duckedVolume) <= Self.volumeTolerance else {
             VocaLogger.info(
                 .audioDucker,
                 "Volume moved to \(Self.percent(current)) while ducked — leaving it alone (\(reason))"
             )
-            return
+            return true
         }
         if control.setVolume(record.originalVolume, of: record.deviceID) {
             VocaLogger.info(
                 .audioDucker,
                 "Restored device \(record.deviceID) to \(Self.percent(record.originalVolume)) (\(reason))"
             )
+            return true
         } else {
             VocaLogger.warning(.audioDucker, "Could not restore volume on device \(record.deviceID) (\(reason))")
+            return false
         }
     }
 
     // MARK: Persistence
 
+    /// Encodes `record` into UserDefaults so a crash mid-dictation can restore later.
     private func persist(_ record: PendingRestore) {
         guard let data = try? JSONEncoder().encode(record) else { return }
         defaults.set(data, forKey: Self.pendingRestoreKey)
     }
 
+    /// Reads a pending restore left by a previous run, or `nil` if none.
     private func loadPersisted() -> PendingRestore? {
         guard let data = defaults.data(forKey: Self.pendingRestoreKey) else { return nil }
         return try? JSONDecoder().decode(PendingRestore.self, from: data)
     }
 
+    /// Drops the persisted pending restore so a later launch will not restore again.
     private func clearPersisted() {
         defaults.removeObject(forKey: Self.pendingRestoreKey)
     }
 
+    /// Formats `volume` as a whole-number percent for log lines.
     private static func percent(_ volume: Float) -> String {
         "\(Int((volume * 100).rounded()))%"
     }

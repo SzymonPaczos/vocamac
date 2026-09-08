@@ -4,6 +4,7 @@
 // Other audio is lowered when the microphone opens and restored on every way
 // a recording can end — not only the happy path.
 
+import AppKit
 import XCTest
 @testable import VocaMac
 
@@ -124,5 +125,20 @@ final class AppStateDuckingTests: XCTestCase {
         await appState.performStartup()
 
         XCTAssertEqual(mocks.audioDucker.restoreAfterUnexpectedExitCallCount, 1)
+    }
+
+    // MARK: Termination
+
+    func testWillTerminateRestoresWhileStillRecording() async {
+        let (appState, mocks) = makeDuckingState()
+
+        await appState.startRecording()
+        XCTAssertTrue(appState.isRecording)
+        XCTAssertEqual(mocks.audioDucker.restoreCallCount, 0)
+
+        NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
+
+        XCTAssertEqual(mocks.audioDucker.restoreCallCount, 1)
+        XCTAssertTrue(appState.isRecording, "Quit does not flip isRecording; restore runs from willTerminate")
     }
 }

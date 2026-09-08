@@ -103,6 +103,7 @@ final class AudioDuckerTests: XCTestCase {
 
         ducker.restore()
         XCTAssertEqual(control.volumes[1]!, 0.6, accuracy: 0.001, "Their choice stands")
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey), "User-moved volume is terminal; drop the record")
     }
 
     func testRestoreTargetsTheDeviceThatWasDuckedNotTheNewDefault() {
@@ -126,6 +127,7 @@ final class AudioDuckerTests: XCTestCase {
 
         ducker.restore()
         XCTAssertEqual(control.setCalls.count, callsBefore, "No device to restore on")
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey), "Gone device is terminal; drop the record")
     }
 
     func testSecondDuckWhileDuckedIsIgnored() {
@@ -196,5 +198,40 @@ final class AudioDuckerTests: XCTestCase {
     func testNextLaunchWithNothingPendingDoesNothing() {
         makeDucker().restoreAfterUnexpectedExit()
         XCTAssertTrue(control.setCalls.isEmpty)
+    }
+
+    // MARK: Failed restore keeps the record for retry
+
+    func testFailedRestoreKeepsPendingSoARetryCanSucceed() {
+        let ducker = makeDucker()
+        ducker.duck()
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+
+        control.setShouldFail = true
+        ducker.restore()
+
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001, "Volume stays ducked when the write fails")
+        XCTAssertNotNil(defaults.data(forKey: AudioDucker.pendingRestoreKey), "Record stays so restore can retry")
+
+        control.setShouldFail = false
+        ducker.restore()
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001)
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
+    }
+
+    func testFailedCrashRecoveryKeepsPersistedRecordForRetry() {
+        makeDucker().duck()
+
+        control.setShouldFail = true
+        let relaunched = makeDucker()
+        relaunched.restoreAfterUnexpectedExit()
+
+        XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
+        XCTAssertNotNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
+
+        control.setShouldFail = false
+        relaunched.restore()
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001)
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 }
