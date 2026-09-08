@@ -186,10 +186,10 @@ final class AudioDuckerTests: XCTestCase {
         }
         let byDevice = Dictionary(uniqueKeysWithValues: records.map { ($0.deviceID, $0) })
         XCTAssertEqual(records.count, 2, "Ducking B must not discard A's unresolved pending")
-        XCTAssertEqual(byDevice[1]?.originalVolume, 0.8, accuracy: 0.001)
-        XCTAssertEqual(byDevice[1]?.duckedVolume, 0.2, accuracy: 0.001)
-        XCTAssertEqual(byDevice[2]?.originalVolume, 0.8, accuracy: 0.001)
-        XCTAssertEqual(byDevice[2]?.duckedVolume, 0.2, accuracy: 0.001)
+        XCTAssertEqual(byDevice[1]!.originalVolume, 0.8, accuracy: 0.001)
+        XCTAssertEqual(byDevice[1]!.duckedVolume, 0.2, accuracy: 0.001)
+        XCTAssertEqual(byDevice[2]!.originalVolume, 0.8, accuracy: 0.001)
+        XCTAssertEqual(byDevice[2]!.duckedVolume, 0.2, accuracy: 0.001)
 
         control.volumes[1] = 0.2
         ducker.restore()
