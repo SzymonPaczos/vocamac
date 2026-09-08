@@ -60,6 +60,18 @@ final class AudioDuckerTests: XCTestCase {
         AudioDucker(control: control, defaults: defaults)
     }
 
+    /// Production persists an array of records; older builds stored one object.
+    private func persistedRecords() -> [AudioDucker.PendingRestore]? {
+        guard let data = defaults.data(forKey: AudioDucker.pendingRestoreKey) else { return nil }
+        if let records = try? JSONDecoder().decode([AudioDucker.PendingRestore].self, from: data) {
+            return records
+        }
+        if let record = try? JSONDecoder().decode(AudioDucker.PendingRestore.self, from: data) {
+            return [record]
+        }
+        return nil
+    }
+
     // MARK: Happy path
 
     func testDuckLowersToAQuarterAndRestoreBringsItBack() {
@@ -151,11 +163,10 @@ final class AudioDuckerTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 
-    func testUnreadablePendingIgnoresASecondDuckOnADifferentDevice() {
+    func testUnreadablePendingAllowsASecondDuckOnADifferentDevice() {
         let ducker = makeDucker()
         ducker.duck()
         XCTAssertEqual(control.volumes[1]!, 0.2, accuracy: 0.001)
-        let setCallsAfterFirstDuck = control.setCalls.count
 
         control.volumes = [:]
         ducker.restore()
@@ -168,15 +179,23 @@ final class AudioDuckerTests: XCTestCase {
         control.defaultDeviceID = 2
         ducker.duck()
 
-        XCTAssertEqual(control.setCalls.count, setCallsAfterFirstDuck, "Second duck must be ignored while a restore is still pending")
-        XCTAssertEqual(control.volumes[2]!, 0.8, accuracy: 0.001, "The new default output must not be ducked")
-        guard let data = defaults.data(forKey: AudioDucker.pendingRestoreKey),
-              let record = try? JSONDecoder().decode(AudioDucker.PendingRestore.self, from: data) else {
-            XCTFail("Expected the original pending restore to remain persisted")
+        XCTAssertEqual(control.volumes[2]!, 0.2, accuracy: 0.001, "The new default output is ducked")
+        guard let records = persistedRecords() else {
+            XCTFail("Expected pending restores to remain persisted")
             return
         }
-        XCTAssertEqual(record.deviceID, 1, "Pending record still refers to the original device")
-        XCTAssertEqual(record.originalVolume, 0.8, accuracy: 0.001)
+        let byDevice = Dictionary(uniqueKeysWithValues: records.map { ($0.deviceID, $0) })
+        XCTAssertEqual(records.count, 2, "Ducking B must not discard A's unresolved pending")
+        XCTAssertEqual(byDevice[1]?.originalVolume, 0.8, accuracy: 0.001)
+        XCTAssertEqual(byDevice[1]?.duckedVolume, 0.2, accuracy: 0.001)
+        XCTAssertEqual(byDevice[2]?.originalVolume, 0.8, accuracy: 0.001)
+        XCTAssertEqual(byDevice[2]?.duckedVolume, 0.2, accuracy: 0.001)
+
+        control.volumes[1] = 0.2
+        ducker.restore()
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001, "A is restored once it is readable again")
+        XCTAssertEqual(control.volumes[2]!, 0.8, accuracy: 0.001, "B is restored with A")
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 
     func testSecondDuckWhileDuckedIsIgnored() {
@@ -253,6 +272,22 @@ final class AudioDuckerTests: XCTestCase {
     func testNextLaunchWithNothingPendingDoesNothing() {
         makeDucker().restoreAfterUnexpectedExit()
         XCTAssertTrue(control.setCalls.isEmpty)
+    }
+
+    func testLegacySinglePendingRestoreStillLoadsOnRelaunch() {
+        let legacy = AudioDucker.PendingRestore(deviceID: 1, originalVolume: 0.8, duckedVolume: 0.2)
+        guard let data = try? JSONEncoder().encode(legacy) else {
+            XCTFail("Failed to encode a legacy single pending restore")
+            return
+        }
+        defaults.set(data, forKey: AudioDucker.pendingRestoreKey)
+        control.volumes = [1: 0.2]
+
+        let relaunched = makeDucker()
+        relaunched.restoreAfterUnexpectedExit()
+
+        XCTAssertEqual(control.volumes[1]!, 0.8, accuracy: 0.001)
+        XCTAssertNil(defaults.data(forKey: AudioDucker.pendingRestoreKey))
     }
 
     // MARK: Failed restore keeps the record for retry

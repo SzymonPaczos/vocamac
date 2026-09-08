@@ -92,8 +92,11 @@ final class SystemOutputVolumeControl: OutputVolumeControlling {
 /// conservative: restore only what was lowered, only on the device it was
 /// lowered on, and only if nobody moved the slider in between.
 ///
-/// The pending restore is also persisted, so a crash mid-dictation does not
-/// leave the Mac quiet: the next launch calls `restoreAfterUnexpectedExit()`.
+/// Pending restores are keyed by device so an unresolved restore on one
+/// output does not block ducking a different readable output, and is never
+/// discarded just to start that later duck. They are also persisted, so a
+/// crash mid-dictation does not leave the Mac quiet: the next launch calls
+/// `restoreAfterUnexpectedExit()`.
 final class AudioDucker: AudioDucking {
 
     /// What `restore()` needs: where the volume was, and where it was put.
@@ -115,7 +118,8 @@ final class AudioDucker: AudioDucking {
 
     private let control: OutputVolumeControlling
     private let defaults: UserDefaults
-    private var pending: PendingRestore?
+    /// Unresolved restores keyed by CoreAudio device ID.
+    private var pending: [UInt32: PendingRestore] = [:]
 
     init(
         control: OutputVolumeControlling = SystemOutputVolumeControl(),
@@ -128,21 +132,27 @@ final class AudioDucker: AudioDucking {
     // MARK: AudioDucking
 
     func duck() {
-        guard pending == nil else {
-            VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
-            return
-        }
         guard let output = control.defaultOutput() else {
             VocaLogger.info(.audioDucker, "Default output has no software volume — not ducking")
             return
         }
+        guard pending[output.deviceID] == nil else {
+            VocaLogger.debug(.audioDucker, "Already ducked — ignoring second duck")
+            return
+        }
+
+        let hadPending = !pending.isEmpty
+        attemptRestore(except: output.deviceID, reason: "before ducking another device")
+
         let target = output.volume * Self.duckedFraction
         guard output.volume - target > Self.volumeTolerance else {
             VocaLogger.debug(.audioDucker, "Output already at \(Self.percent(output.volume)) — nothing to duck")
+            if hadPending { persistPending() }
             return
         }
         guard control.setVolume(target, of: output.deviceID) else {
             VocaLogger.warning(.audioDucker, "Could not set volume on device \(output.deviceID)")
+            if hadPending { persistPending() }
             return
         }
         let record = PendingRestore(
@@ -150,8 +160,8 @@ final class AudioDucker: AudioDucking {
             originalVolume: output.volume,
             duckedVolume: target
         )
-        pending = record
-        persist(record)
+        pending[output.deviceID] = record
+        persistPending()
         VocaLogger.info(
             .audioDucker,
             "Ducked device \(output.deviceID): \(Self.percent(output.volume)) → \(Self.percent(target))"
@@ -159,21 +169,18 @@ final class AudioDucker: AudioDucking {
     }
 
     func restore() {
-        guard let record = pending else { return }
-        if finishRestore(record, reason: "recording ended") {
-            pending = nil
-            clearPersisted()
-        }
+        guard !pending.isEmpty else { return }
+        attemptRestore(reason: "recording ended")
+        persistPending()
     }
 
     func restoreAfterUnexpectedExit() {
-        guard pending == nil, let record = loadPersisted() else { return }
-        if finishRestore(record, reason: "previous run ended while ducked") {
-            pending = nil
-            clearPersisted()
-        } else {
-            pending = record
+        if pending.isEmpty {
+            pending = loadPersisted()
         }
+        guard !pending.isEmpty else { return }
+        attemptRestore(reason: "previous run ended while ducked")
+        persistPending()
     }
 
     // MARK: Restore policy
@@ -213,23 +220,50 @@ final class AudioDucker: AudioDucking {
         }
     }
 
+    // MARK: Pending set
+
+    /// Runs `finishRestore` for every pending record except `excludedDeviceID`.
+    /// Removes only records that finish successfully; unreadable and failed-write
+    /// pendings stay so a later retry can still restore them.
+    private func attemptRestore(except excludedDeviceID: UInt32? = nil, reason: String) {
+        let deviceIDs = pending.keys.filter { $0 != excludedDeviceID }
+        for deviceID in deviceIDs {
+            guard let record = pending[deviceID] else { continue }
+            if finishRestore(record, reason: reason) {
+                pending.removeValue(forKey: deviceID)
+            }
+        }
+    }
+
     // MARK: Persistence
 
-    /// Encodes `record` into UserDefaults so a crash mid-dictation can restore later.
-    private func persist(_ record: PendingRestore) {
-        guard let data = try? JSONEncoder().encode(record) else { return }
+    /// Encodes the full pending set so a crash mid-dictation can restore later.
+    /// An empty set clears the key rather than leaving a stale record.
+    private func persistPending() {
+        guard !pending.isEmpty else {
+            defaults.removeObject(forKey: Self.pendingRestoreKey)
+            return
+        }
+        let records = pending.values.sorted { $0.deviceID < $1.deviceID }
+        guard let data = try? JSONEncoder().encode(records) else { return }
         defaults.set(data, forKey: Self.pendingRestoreKey)
     }
 
-    /// Reads a pending restore left by a previous run, or `nil` if none.
-    private func loadPersisted() -> PendingRestore? {
-        guard let data = defaults.data(forKey: Self.pendingRestoreKey) else { return nil }
-        return try? JSONDecoder().decode(PendingRestore.self, from: data)
-    }
-
-    /// Drops the persisted pending restore so a later launch will not restore again.
-    private func clearPersisted() {
-        defaults.removeObject(forKey: Self.pendingRestoreKey)
+    /// Reads pending restores left by a previous run. Accepts both the current
+    /// array encoding and a legacy single `PendingRestore` object.
+    private func loadPersisted() -> [UInt32: PendingRestore] {
+        guard let data = defaults.data(forKey: Self.pendingRestoreKey) else { return [:] }
+        if let records = try? JSONDecoder().decode([PendingRestore].self, from: data) {
+            var map: [UInt32: PendingRestore] = [:]
+            for record in records {
+                map[record.deviceID] = record
+            }
+            return map
+        }
+        if let record = try? JSONDecoder().decode(PendingRestore.self, from: data) {
+            return [record.deviceID: record]
+        }
+        return [:]
     }
 
     /// Formats `volume` as a whole-number percent for log lines.

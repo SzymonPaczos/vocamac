@@ -64,7 +64,7 @@ extension SoundPlaying {
 
 /// Lowers other audio while a recording is open and puts it back afterwards.
 protocol AudioDucking: AnyObject {
-    /// Lower the default output volume. A second call while ducked is ignored.
+    /// Lower the default output volume. A second call on the same already-ducked device is ignored.
     func duck()
     /// Put the volume back if it is still where `duck` left it.
     func restore()
